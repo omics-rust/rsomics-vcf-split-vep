@@ -1,0 +1,32 @@
+[package]
+name = "rsomics-vcf-split-vep"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/omics-rust/rsomics-vcf-split-vep"
+authors = ["Zane Leong <efd@live.com>"]
+description = "Query and extract structured VEP/bcftools-csq CSQ/BCSQ annotations — Rust port of bcftools +split-vep"
+categories = ["science", "command-line-utilities"]
+keywords = ["vcf", "vep", "csq", "bcftools", "bioinformatics"]
+
+[[bin]]
+name = "rsomics-vcf-split-vep"
+path = "src/main.rs"
+
+[lib]
+name = "rsomics_vcf_split_vep"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+rsomics-common = { version = "0.6" }
+clap = { version = "4", features = ["derive"] }
+flate2 = "1"
+
+[dev-dependencies]
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "bench"
+harness = false
