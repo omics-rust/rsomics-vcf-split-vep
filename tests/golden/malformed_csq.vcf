@@ -1,0 +1,6 @@
+##fileformat=VCFv4.2
+##INFO=<ID=CSQ,Number=.,Type=String,Description="Consequence annotations from Ensembl VEP. Format: Allele|Consequence|Gene|Feature">
+##contig=<ID=chr1>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr1	100	.	A	T	100	PASS	CSQ=T|missense_variant|GENE1|tx1
+chr1	200	.	C	G	100	PASS	CSQ=G

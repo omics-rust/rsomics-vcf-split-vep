@@ -2,7 +2,7 @@
 //! `-l` (list), `-f` (extract, with `-d` and `-s worst`), and `-c` (annotate VCF).
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Output};
 
 fn golden() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/annotated.vcf.gz")
@@ -14,6 +14,14 @@ fn ours_bin() -> &'static str {
 
 fn stdout_of(mut cmd: Command, args: &[&str], file: &PathBuf) -> Vec<u8> {
     cmd.args(args).arg(file).output().unwrap().stdout
+}
+
+fn run_ours(args: &[&str], file: &PathBuf) -> Output {
+    Command::new(ours_bin())
+        .args(args)
+        .arg(file)
+        .output()
+        .unwrap()
 }
 
 /// Drop bcftools' provenance/version header lines that we deliberately don't emit.
@@ -37,6 +45,8 @@ fn matches_bcftools_split_vep() {
     let exact: &[&[&str]] = &[
         &["-a", "BCSQ", "-l"],
         &["-a", "BCSQ", "-f", r"%POS\t%Consequence\n"],
+        // The @-reference records (dna_change empty) are dropped by both.
+        &["-a", "BCSQ", "-f", r"%POS\t%dna_change\n"],
         &[
             "-a",
             "BCSQ",
@@ -84,4 +94,78 @@ fn matches_bcftools_split_vep() {
             "diverged from bcftools +split-vep for {args:?}"
         );
     }
+}
+
+/// bcftools drops a record whose every requested CSQ subfield is empty/missing.
+/// The golden has 12 `BCSQ=@POS` reference records (a single column), so
+/// requesting `%dna_change` (schema index 6) drops exactly those 12, leaving 188
+/// of the 200 annotated records. Expected count is bcftools 1.23.1-verified.
+#[test]
+fn empty_subfield_records_dropped() {
+    let g = golden();
+    let out = run_ours(&["-a", "BCSQ", "-f", r"%POS\t%dna_change\n"], &g);
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(
+        text.lines().count(),
+        188,
+        "expected the 12 @-ref rows dropped"
+    );
+    for at_ref_pos in ["1578", "2341", "11304"] {
+        assert!(
+            !text
+                .lines()
+                .any(|l| l.starts_with(&format!("{at_ref_pos}\t"))),
+            "@-ref record {at_ref_pos} should have been dropped"
+        );
+    }
+
+    // -u does not rescue a defined-but-missing CSQ subfield: still dropped.
+    let out_u = run_ours(&["-a", "BCSQ", "-u", "-f", r"%POS\t%dna_change\n"], &g);
+    assert!(out_u.status.success());
+    assert_eq!(
+        String::from_utf8(out_u.stdout).unwrap().lines().count(),
+        188
+    );
+}
+
+/// A `-f` tag that is neither a CSQ subfield nor a header-defined INFO tag is a
+/// fatal error without `-u`; with `-u` it renders as "." and the @-ref records
+/// survive (no CSQ subfield is requested, so nothing is dropped).
+#[test]
+fn undefined_tag_fails_loud() {
+    let g = golden();
+    let bad = run_ours(&["-a", "BCSQ", "-f", r"%POS\t%nonexistent_tag\n"], &g);
+    assert!(!bad.status.success(), "undefined tag must fail loud");
+    let err = String::from_utf8(bad.stderr).unwrap();
+    assert!(
+        err.contains("no such tag defined in the VCF header: INFO/nonexistent_tag"),
+        "unexpected stderr: {err}"
+    );
+
+    let ok = run_ours(&["-a", "BCSQ", "-u", "-f", r"%POS\t%nonexistent_tag\n"], &g);
+    assert!(ok.status.success(), "-u should accept the undefined tag");
+    let text = String::from_utf8(ok.stdout).unwrap();
+    assert_eq!(
+        text.lines().count(),
+        200,
+        "no CSQ subfield requested: no drop"
+    );
+    assert!(text.lines().all(|l| l.ends_with("\t.")));
+    assert!(text.lines().any(|l| l.starts_with("1578\t")));
+}
+
+/// A CSQ entry with fewer columns than the Consequence field index is fatal in
+/// bcftools ("Too few columns"), not silently padded. `malformed_csq.vcf` puts
+/// Consequence at index 1 and a one-column entry at chr1:200.
+#[test]
+fn malformed_csq_too_few_columns() {
+    let f = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/malformed_csq.vcf");
+    let out = run_ours(&["-a", "CSQ", "-f", r"%POS\t%Gene\n"], &f);
+    assert!(!out.status.success(), "too-few-columns CSQ must fail loud");
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        err.contains("Too few columns at chr1:200") && err.contains("(Consequence)"),
+        "unexpected stderr: {err}"
+    );
 }

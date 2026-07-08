@@ -1,6 +1,7 @@
 //! Core of `bcftools +split-vep`: parse the CSQ/BCSQ schema from the VCF header
 //! and extract per-transcript subfields via a query-style format string.
 
+use std::collections::HashSet;
 use std::io::Write;
 
 use rsomics_common::{Result, RsomicsError};
@@ -9,6 +10,21 @@ use rsomics_common::{Result, RsomicsError};
 pub struct Schema {
     pub tag: String,
     pub fields: Vec<String>,
+}
+
+/// Every `INFO` tag ID declared in the VCF header. A format `%tag` that is
+/// neither a CSQ subfield nor one of these is undefined (bcftools fails loud).
+pub fn info_tag_ids(header: &[String]) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    for line in header {
+        if let Some(rest) = line.strip_prefix("##INFO=<ID=") {
+            let id: String = rest.chars().take_while(|&c| c != ',' && c != '>').collect();
+            if !id.is_empty() {
+                ids.insert(id);
+            }
+        }
+    }
+    ids
 }
 
 impl Schema {
@@ -137,29 +153,61 @@ pub struct Extractor {
     tokens: Vec<Token>,
     schema: Schema,
     duplicate: bool,
-    allow_undef: bool,
     /// `-s worst`: keep only the single most-severe transcript per record.
     select_worst: bool,
     consequence_idx: Option<usize>,
+    /// Schema indices of the CSQ subfields named in the format. A record whose
+    /// every one of these is empty/missing is dropped (bcftools' default).
+    annot_indices: Vec<usize>,
 }
 
 impl Extractor {
+    /// Fails loud on a format `%tag` that is neither a VCF column, a CSQ
+    /// subfield, nor a header-defined INFO tag — unless `allow_undef` (`-u`),
+    /// under which such a tag renders as ".".
     pub fn new(
         format: &str,
         schema: Schema,
+        info_tags: &HashSet<String>,
         duplicate: bool,
         allow_undef: bool,
         select_worst: bool,
-    ) -> Self {
+    ) -> Result<Self> {
         let consequence_idx = schema.index_of("Consequence");
-        Self {
-            tokens: parse_format(format),
+        let tokens = parse_format(format);
+        let mut annot_indices = Vec::new();
+        for tok in &tokens {
+            let Token::Field(name) = tok else { continue };
+            if VCF_COLS.contains(&name.as_str()) {
+                continue;
+            }
+            if let Some(key) = name.strip_prefix("INFO/") {
+                if !info_tags.contains(key) && !allow_undef {
+                    return Err(undef_tag(key));
+                }
+                continue;
+            }
+            if let Some(idx) = schema.index_of(name) {
+                if !annot_indices.contains(&idx) {
+                    annot_indices.push(idx);
+                }
+                continue;
+            }
+            if info_tags.contains(name) {
+                continue;
+            }
+            if !allow_undef {
+                return Err(undef_tag(name));
+            }
+        }
+        Ok(Self {
+            tokens,
             schema,
             duplicate,
-            allow_undef,
             select_worst,
             consequence_idx,
-        }
+            annot_indices,
+        })
     }
 
     /// List the schema fields as `<index>\t<name>` (the `-l` mode).
@@ -187,6 +235,22 @@ impl Extractor {
             .map(|e| e.split('|').collect::<Vec<_>>())
             .collect();
 
+        // bcftools evaluates the Consequence column of every transcript to rank
+        // severity, so an entry too short to hold it is a fatal error.
+        if let Some(ci) = self.consequence_idx {
+            for e in &split {
+                if ci >= e.len() {
+                    return Err(RsomicsError::InvalidInput(format!(
+                        "Too few columns at {}:{} .. {ci} ({}) >= {}",
+                        cols[0],
+                        cols[1],
+                        self.schema.fields[ci],
+                        e.len(),
+                    )));
+                }
+            }
+        }
+
         // -s worst: keep only the single most-severe transcript (first on ties).
         if self.select_worst
             && split.len() > 1
@@ -206,12 +270,30 @@ impl Extractor {
 
         if self.duplicate {
             for entry in &split {
+                if self.all_missing(std::slice::from_ref(entry)) {
+                    continue;
+                }
                 self.write_line(&cols, Some(entry), &split, out)?;
             }
         } else {
+            if self.all_missing(&split) {
+                return Ok(());
+            }
             self.write_line(&cols, None, &split, out)?;
         }
         Ok(())
+    }
+
+    /// True when the format names CSQ subfields and every one of them is
+    /// empty/missing across `entries` — the record (or `-d` transcript) bcftools
+    /// drops rather than emitting a row of dots.
+    fn all_missing(&self, entries: &[Vec<&str>]) -> bool {
+        !self.annot_indices.is_empty()
+            && self.annot_indices.iter().all(|&fi| {
+                entries
+                    .iter()
+                    .all(|e| e.get(fi).is_none_or(|s| s.is_empty()))
+            })
     }
 
     fn write_line<W: Write>(
@@ -250,11 +332,9 @@ impl Extractor {
         if let Some(v) = info_value(cols[7], name) {
             return v;
         }
-        if self.allow_undef {
-            ".".to_string()
-        } else {
-            String::new()
-        }
+        // A header-defined tag absent from this record, or an undefined tag
+        // reached only under `-u`: bcftools renders both as ".".
+        ".".to_string()
     }
 
     /// A CSQ subfield: in `-d` mode the current entry's value, otherwise the
@@ -286,6 +366,12 @@ fn annotation_entries(info: &str, tag: &str) -> Vec<String> {
         }
     }
     Vec::new()
+}
+
+fn undef_tag(name: &str) -> RsomicsError {
+    RsomicsError::InvalidInput(format!(
+        "no such tag defined in the VCF header: INFO/{name}"
+    ))
 }
 
 fn info_value(info: &str, key: &str) -> Option<String> {

@@ -130,13 +130,15 @@ impl Tool for Cli {
                             )));
                         }
                     };
+                    let info_tags = rsomics_vcf_split_vep::info_tag_ids(&header);
                     extractor = Some(Extractor::new(
                         format,
                         schema,
+                        &info_tags,
                         self.duplicate,
                         self.allow_undef,
                         select_worst,
-                    ));
+                    )?);
                 }
                 header_done = true;
                 continue;
