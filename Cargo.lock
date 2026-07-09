@@ -410,7 +410,7 @@ dependencies = [
 
 [[package]]
 name = "rsomics-vcf-split-vep"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "clap",
  "criterion",

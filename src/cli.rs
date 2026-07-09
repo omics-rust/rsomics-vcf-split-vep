@@ -74,6 +74,7 @@ impl Tool for Cli {
         let mut reader = open_reader(&self.input)?;
         let sink: Box<dyn Write> = match &self.output {
             Some(p) => Box::new(File::create(p).map_err(RsomicsError::Io)?),
+            None if self.common.json => Box::new(io::sink()),
             None => Box::new(io::stdout()),
         };
         let mut out = BufWriter::new(sink);
